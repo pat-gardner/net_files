@@ -10,14 +10,19 @@
 #include <arpa/inet.h>
 
 #define BUF_LEN 4096
-#define MAX_FDS 128
+#define MAX_FDS 1024 //Not portable, but this is the max on my raspi
 #define NUM_ARGS 3
 
+// Control printing
+#define DEBUG 1
+#define dprintf(...) if (DEBUG) {printf(__VA_ARGS__);}
 int main(int argc, char** argv) {
     int ifd, num_fds = 1;
+    int my_flags = IN_CREATE | IN_DELETE | IN_CLOSE_WRITE | 
+            IN_MOVED_FROM | IN_MOVED_TO; // TODO: IN_OPEN?
     int watch_fds[MAX_FDS];
     char buf[BUF_LEN] __attribute__ ((aligned(__alignof__(struct inotify_event))));
-    char* path_map[1024]; // i'th index gives path of the watch descriptor i
+    char* path_map[MAX_FDS]; // i'th index gives path of the watch descriptor i
 
     int ret, port, sock_fd;
     char* server_ip;
@@ -48,7 +53,7 @@ int main(int argc, char** argv) {
     sock_addr.sin_family = AF_INET;
     sock_addr.sin_port = htons(port);
     inet_aton(server_ip, &sock_addr.sin_addr);
-
+/*
     printf("Trying to connect to server at %s:%d\n", server_ip, port);
     ret = connect(sock_fd, (struct sockaddr*) &sock_addr, 
             sizeof(struct sockaddr_in));
@@ -56,7 +61,8 @@ int main(int argc, char** argv) {
         perror("connect");
         exit(EXIT_FAILURE);
     }
-
+*/  //Local testing
+    
     // Initialize the map and the first path
     memset(path_map, 0, sizeof(path_map));
     path_map[watch_fds[0]] = argv[1];
@@ -66,14 +72,14 @@ int main(int argc, char** argv) {
         len = read(ifd, buf, BUF_LEN);
         while (offset < len) {
             struct inotify_event *event = (struct inotify_event*) &buf[offset];
-            printf("wd=%d, mask=%u, cookie=%u, len=%u, name=%s\n", event->wd, 
+            dprintf("wd=%d, mask=%u, cookie=%u, len=%u, name=%s\n", event->wd, 
                     event->mask, event->cookie, event->len,
                     event->len > 0 ? event->name : "N/A");
             // Update offset to the index of the start of the next event
             offset += sizeof(struct inotify_event) + event->len;
             //Print the type of event
-            if (event->mask & IN_CREATE) {
-                printf("\tIN_CREATE\n");
+            if (event->mask & IN_CREATE) { //TODO: or moved to
+                dprintf("\tIN_CREATE\n");
                 if (num_fds < MAX_FDS && event->len) {
                     size_t pathlen = strlen(path_map[event->wd]) + event->len + 1;
                     char* path = (char*) malloc(pathlen * sizeof(char));
@@ -82,7 +88,7 @@ int main(int argc, char** argv) {
                         snprintf(path, pathlen, "%s%s/", path_map[event->wd], event->name);
                     else
                         snprintf(path, pathlen, "%s%s", path_map[event->wd], event->name);
-                    printf("Trying to add: %s\n", path);
+                    dprintf("Trying to add: %s\n", path);
                     wfd = inotify_add_watch(ifd, path, IN_ALL_EVENTS);
                     if (wfd == -1) {
                         perror("Adding new watch");
@@ -93,29 +99,29 @@ int main(int argc, char** argv) {
                 }
             }
             if (event->mask & IN_ACCESS) 
-                printf("\tIN_ACCESS\n");
+                dprintf("\tIN_ACCESS\n");
             if (event->mask & IN_ATTRIB)
-                printf("\tIN_ATTRIB\n");
+                dprintf("\tIN_ATTRIB\n");
             if (event->mask & IN_CLOSE_WRITE)
-                printf("\tIN_CLOSE_WRITE\n");
+                dprintf("\tIN_CLOSE_WRITE\n");
             if (event->mask & IN_CLOSE_NOWRITE)
-                printf("\tIN_CLOSE_NOWRITE\n");
+                dprintf("\tIN_CLOSE_NOWRITE\n");
             if (event->mask & IN_DELETE)
-                printf("\tIN_DELETE\n");
+                dprintf("\tIN_DELETE\n");
             if (event->mask & IN_DELETE_SELF)
-                printf("\tIN_DELETE_SELF\n");
+                dprintf("\tIN_DELETE_SELF\n");
             if (event->mask & IN_MODIFY)
-                printf("\tIN_MODIFY\n");
+                dprintf("\tIN_MODIFY\n");
             if (event->mask & IN_MOVE_SELF)    
-                printf("\tIN_MOVE_SELF\n");
+                dprintf("\tIN_MOVE_SELF\n");
             if (event->mask & IN_MOVED_FROM)
-                printf("\tIN_MOVED_FROM\n");
+                dprintf("\tIN_MOVED_FROM\n");
             if (event->mask & IN_MOVED_TO)
-                printf("\tIN_MOVED_TO\n");
+                dprintf("\tIN_MOVED_TO\n");
             if (event->mask & IN_OPEN)
-                printf("\tIN_OPEN\n");
+                dprintf("\tIN_OPEN\n");
         }
     }
-    
+    //TODO: free non-null entries in path_map
     return 0;
 }
