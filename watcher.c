@@ -2,27 +2,54 @@
 #include <stdio.h>
 #include <sys/inotify.h>
 #include <stdlib.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
 #include <unistd.h>
 
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <netinet/ip.h>
 #include <arpa/inet.h>
+#include <sys/sendfile.h>
 
-#define BUF_LEN 4096
+#include "watcher.h"
+
+#define IN_BUF_LEN 4096
 #define MAX_FDS 1024 //Not portable, but this is the max on my raspi
 #define NUM_ARGS 3
 
-// Control printing
-#define DEBUG 1
-#define dprintf(...) if (DEBUG) {printf(__VA_ARGS__);}
+
+
+void send_path(int fd, char* path) {
+    int pathlen = strlen(path) + 1;
+    int offset = 0, ret;
+    // First send the length of the path
+    ret = write(fd, &pathlen, sizeof(int));
+    if (ret == -1) {
+        perror("write");
+        exit(EXIT_FAILURE);
+    }
+    // Then the actual pathname
+    while (offset < pathlen) {
+        ret = write(fd, path + offset, pathlen - offset);
+        if (ret == -1) {
+            perror("write");
+            exit(EXIT_FAILURE);
+        }
+        offset += ret;
+    }
+}
+
 int main(int argc, char** argv) {
     int ifd, num_fds = 1;
-    int my_flags = IN_CREATE | IN_DELETE | IN_CLOSE_WRITE | 
+    int in_my_flags = IN_CREATE | IN_DELETE | IN_CLOSE_WRITE | 
             IN_MOVED_FROM | IN_MOVED_TO; // TODO: IN_OPEN?
     int watch_fds[MAX_FDS];
-    char buf[BUF_LEN] __attribute__ ((aligned(__alignof__(struct inotify_event))));
+    char buf[IN_BUF_LEN] __attribute__ ((aligned(__alignof__(struct inotify_event))));
     char* path_map[MAX_FDS]; // i'th index gives path of the watch descriptor i
+
+    enum f_event event_type;
 
     int ret, port, sock_fd;
     char* server_ip;
@@ -41,7 +68,7 @@ int main(int argc, char** argv) {
         return -1;
     }
 
-    if ((watch_fds[0] = inotify_add_watch(ifd, argv[1], IN_ALL_EVENTS)) == -1) {
+    if ((watch_fds[0] = inotify_add_watch(ifd, argv[1], in_my_flags)) == -1) {
         perror("Add watch");
         return -1;
     }
@@ -53,7 +80,7 @@ int main(int argc, char** argv) {
     sock_addr.sin_family = AF_INET;
     sock_addr.sin_port = htons(port);
     inet_aton(server_ip, &sock_addr.sin_addr);
-/*
+
     printf("Trying to connect to server at %s:%d\n", server_ip, port);
     ret = connect(sock_fd, (struct sockaddr*) &sock_addr, 
             sizeof(struct sockaddr_in));
@@ -61,7 +88,6 @@ int main(int argc, char** argv) {
         perror("connect");
         exit(EXIT_FAILURE);
     }
-*/  //Local testing
     
     // Initialize the map and the first path
     memset(path_map, 0, sizeof(path_map));
@@ -69,9 +95,10 @@ int main(int argc, char** argv) {
 
     while (1) {
         ssize_t len, offset = 0;
-        len = read(ifd, buf, BUF_LEN);
+        len = read(ifd, buf, IN_BUF_LEN);
         while (offset < len) {
             struct inotify_event *event = (struct inotify_event*) &buf[offset];
+            struct stat stat_buf;
             dprintf("wd=%d, mask=%u, cookie=%u, len=%u, name=%s\n", event->wd, 
                     event->mask, event->cookie, event->len,
                     event->len > 0 ? event->name : "N/A");
@@ -81,6 +108,7 @@ int main(int argc, char** argv) {
             if (event->mask & IN_CREATE) { //TODO: or moved to
                 dprintf("\tIN_CREATE\n");
                 if (num_fds < MAX_FDS && event->len) {
+                    // Add the new file to our local dictionary
                     size_t pathlen = strlen(path_map[event->wd]) + event->len + 1;
                     char* path = (char*) malloc(pathlen * sizeof(char));
                     int wfd;
@@ -89,6 +117,17 @@ int main(int argc, char** argv) {
                     else
                         snprintf(path, pathlen, "%s%s", path_map[event->wd], event->name);
                     dprintf("Trying to add: %s\n", path);
+                    // Send the new file path to the server
+                    send_path(sock_fd, path);
+                    // Send the event type
+                    event_type = f_create;
+                    ret = write(sock_fd, &event_type, sizeof(enum f_event));
+                    if (ret == -1) {
+                        perror("write");
+                        exit(EXIT_FAILURE);
+                    }
+
+                    // Add the new file to the watch list
                     wfd = inotify_add_watch(ifd, path, IN_ALL_EVENTS);
                     if (wfd == -1) {
                         perror("Adding new watch");
@@ -97,19 +136,66 @@ int main(int argc, char** argv) {
                     path_map[wfd] = path;
                     watch_fds[num_fds++] = wfd;
                 }
-            }
+            } //IN_CREATE
             if (event->mask & IN_ACCESS) 
                 dprintf("\tIN_ACCESS\n");
             if (event->mask & IN_ATTRIB)
                 dprintf("\tIN_ATTRIB\n");
-            if (event->mask & IN_CLOSE_WRITE)
+            if (event->mask & IN_CLOSE_WRITE) {
                 dprintf("\tIN_CLOSE_WRITE\n");
+                // If it's a file, send the contents
+                if ( !(event->mask & IN_ISDIR) ) {
+                    int offset = 0;
+                    off_t file_size;
+                    char* path = path_map[event->wd];
+                    int in_fd = open(path, O_RDONLY);
+                    // Send the pathname
+                    send_path(sock_fd, path);
+                    // Send the event type
+                    event_type = f_modify;
+                    ret = write(sock_fd, &event_type, sizeof(enum f_event));
+                    if (ret == -1) {
+                        perror("write");
+                        exit(EXIT_FAILURE);
+                    }
+                    // Send the file size, then contents 
+                    fstat(in_fd, &stat_buf);
+                    file_size = stat_buf.st_size;
+                    ret = write(sock_fd, &file_size, sizeof(off_t));
+                    if (ret == -1) {
+                        perror("write");
+                        exit(EXIT_FAILURE);
+                    }
+                    while (offset < file_size) {
+                        ret = sendfile(sock_fd, in_fd, NULL, file_size);
+                        if (ret == -1) {
+                            perror("sendfile");
+                            exit(EXIT_FAILURE);
+                        }
+                        offset += ret;
+                    }
+                }
+            }
+            if (event->mask & IN_DELETE_SELF) {
+                dprintf("\tIN_DELETE_SELF\n");
+                // Send the path to the server
+                char* path = path_map[event->wd];
+                send_path(sock_fd, path);
+                // Send the event type
+                event_type = f_delete;
+                ret = write(sock_fd, &event_type, sizeof(enum f_event));
+                if (ret == -1) {
+                    perror("write");
+                    exit(EXIT_FAILURE);
+                }
+                // Remove the path from the path map
+                path_map[event->wd] = NULL;
+                //TODO: remove from the list of FDs or remove list entirely
+            }
             if (event->mask & IN_CLOSE_NOWRITE)
                 dprintf("\tIN_CLOSE_NOWRITE\n");
             if (event->mask & IN_DELETE)
                 dprintf("\tIN_DELETE\n");
-            if (event->mask & IN_DELETE_SELF)
-                dprintf("\tIN_DELETE_SELF\n");
             if (event->mask & IN_MODIFY)
                 dprintf("\tIN_MODIFY\n");
             if (event->mask & IN_MOVE_SELF)    
