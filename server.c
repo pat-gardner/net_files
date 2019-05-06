@@ -12,16 +12,55 @@
 #include <netinet/ip.h>
 #include <arpa/inet.h>
 
-#include "watcher.h"
+#include "net_files.h"
 
 #define BUF_LEN 4096
 #define NUM_ARGS 2
 
+#define MIN(x, y) ( ((x) < (y)) ? (x) : (y) )
+
+char read_buf[BUF_LEN];
+
+void recv_file(char* path, int data_fd) {
+    off_t file_size;
+    int offset = 0, ret;
+    int local_file = open(path, O_WRONLY | O_TRUNC);
+    if (local_file == -1) {
+        perror("open");
+        exit(EXIT_FAILURE);
+    }
+    //Receive the file size
+    ret = read(data_fd, &file_size, sizeof(off_t));
+    if (ret == -1) {
+        perror("read");
+        exit(EXIT_FAILURE);
+    }
+    //Receive the contents
+    while (offset < file_size) {
+        // Read a chunk of BUF_LEN bytes and write it out
+        int chunk_offset = 0;
+        while (chunk_offset < BUF_LEN && offset < file_size) {
+            ret = read(data_fd, read_buf + chunk_offset,
+                    MIN(BUF_LEN - chunk_offset, file_size - offset));
+            if (ret == -1) {
+                perror("read");
+                exit(EXIT_FAILURE);
+            }
+            chunk_offset += ret;
+            offset += ret;
+        }
+        ret = write(local_file, read_buf, chunk_offset);
+        if (ret == -1) {
+            perror("write");
+            exit(EXIT_FAILURE);
+        }
+    }
+}
+
 int main(int argc, char** argv) {
 	int sock_fd, data_fd, port, ret;
 	struct sockaddr_in inet_addr, client_addr;
-	socklen_t peer_addr_size;
-	char read_buf[BUF_LEN];
+	socklen_t peer_addr_size;	
 	char* MY_IP;
     enum f_event event_type;
 
@@ -112,6 +151,8 @@ int main(int argc, char** argv) {
                         }
                         close(ret);
                     }
+                    // Then get the file contents
+                    recv_file(path, data_fd);
                     break;
                 
                 case f_delete:
@@ -125,40 +166,11 @@ int main(int argc, char** argv) {
 
                 case f_modify:
                     dprintf("Modifying %s\n", path);
-                    off_t file_size;
-                    int curr_file = open(path, O_WRONLY | O_TRUNC); 
-                    if (curr_file == -1) {
-                        perror("open");
-                        exit(EXIT_FAILURE);
-                    }
-                    // Receive the file size, then contents
-                    ret = read(data_fd, &file_size, sizeof(off_t));
-                    if (ret == -1) {
-                        perror("read");
-                        exit(EXIT_FAILURE);
-                    }
-                    offset = 0;
-                    while (offset < file_size) {
-                        // Read a chunk of BUF_LEN bytes and write it out
-                        int chunk_offset = 0;
-                        while (chunk_offset < BUF_LEN && offset < file_size) {
-                            ret = read(data_fd, read_buf + chunk_offset, 
-                                    BUF_LEN - chunk_offset);
-                            if (ret == -1) {
-                                perror("read");
-                                exit(EXIT_FAILURE);
-                            }
-                            chunk_offset += ret;
-                            offset += ret;
-                        }
-                        ret = write(curr_file, read_buf, chunk_offset);
-                        if (ret == -1) {
-                            perror("write");
-                            exit(EXIT_FAILURE);
-                        }
-                    }
+                    // Get the file contents
+                    recv_file(path, data_fd);
                     break;
             }
+            free(path);
         }
 	} 
 	return 0;

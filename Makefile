@@ -1,13 +1,20 @@
-CFLAGS=-Wall -g
+CFLAGS=-Wall -g 
 
-all: watcher socket
+all: watcher server
 
-watcher: watcher.c
+watcher: watcher.c net_files.h
 	gcc $(CFLAGS) -o watcher.exe watcher.c
 
-socket: my_socket.h client_inet.c server_inet.c
-	gcc $(CFLAGS) -o client_inet.exe client_inet.c
-	gcc $(CFLAGS) -o server_inet.exe server_inet.c
+server: server.c net_files.h
+	gcc $(CFLAGS) -o server.exe server.c
+
+64: watcher64 server64
+
+watcher64: watcher.c net_files.h
+	gcc $(CFLAGS) -m32 -o watcher.exe watcher.c
+
+server64: server.c net_files.h
+	gcc $(CFLAGS) -m32 -o server.exe server.c
 
 clean:
-	rm watcher.exe client_inet.exe server_inet.exe
+	rm *.exe
