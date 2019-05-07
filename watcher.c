@@ -21,9 +21,12 @@
 
 //TODO: create a directory for the fs root
 
-// Remember to free the char* returned by this
+/* Concatenate the file name child with the path parent.
+ * Appends '/' to the end if child is a directory.
+ * Returns a pointer that should be free'd when done.
+ */
 char* join_path(char* parent, char* child, int is_dir) {
-    size_t pathlen = strlen(parent) + strlen(child) + 1;
+    size_t pathlen = strlen(parent) + strlen(child) + 2;
     char* path = malloc(pathlen * sizeof(char));
     if (is_dir)
         snprintf(path, pathlen, "%s%s/", parent, child);
@@ -31,7 +34,9 @@ char* join_path(char* parent, char* child, int is_dir) {
         snprintf(path, pathlen, "%s%s", parent, child);
     return path;
 }
-
+/* Writes path to the file (probably a socket) represented
+ * by fd. 
+ */
 void send_path(int fd, char* path) {
     int pathlen = strlen(path) + 1;
     int offset = 0, ret;
@@ -51,7 +56,9 @@ void send_path(int fd, char* path) {
         offset += ret;
     }
 }
-
+/* Sends the contents of the file represented by path to 
+ * the socket sock_fd
+ */
 void send_file(int sock_fd, char* path) {
     int ret, offset = 0;
     off_t file_size;
@@ -77,7 +84,7 @@ void send_file(int sock_fd, char* path) {
 
 int main(int argc, char** argv) {
     int ifd, num_fds = 1;
-    int in_my_flags = IN_CREATE | IN_DELETE_SELF | IN_DELETE | IN_CLOSE_WRITE | 
+    int in_my_flags = IN_CREATE | IN_DELETE | IN_CLOSE_WRITE | 
             IN_MOVED_FROM | IN_MOVED_TO; // TODO: IN_OPEN?
     int watch_fds[MAX_FDS];
     char buf[IN_BUF_LEN] __attribute__ ((aligned(__alignof__(struct inotify_event))));
@@ -138,14 +145,13 @@ int main(int argc, char** argv) {
             // Update offset to the index of the start of the next event
             offset += sizeof(struct inotify_event) + event->len;
             //Print the type of event
-            if (event->mask & IN_CREATE) { //TODO: or moved to
-                dprintf("\tIN_CREATE\n");
+            if (event->mask & IN_CREATE || event->mask & IN_MOVED_TO) { 
                 if (num_fds < MAX_FDS && event->len) {
                     // Add the new file to our local dictionary
                     char* path = join_path(path_map[event->wd], event->name, 
                             event->mask & IN_ISDIR);
                     int wfd;
-                    dprintf("Trying to add: %s\n", path);
+                    dprintf("IN_CREATE: %s\n", path);
                     // Send the new file path to the server
                     send_path(sock_fd, path);
                     // Send the event type
@@ -155,8 +161,9 @@ int main(int argc, char** argv) {
                         perror("write");
                         exit(EXIT_FAILURE);
                     }
-                    // Send the contents
-                    send_file(sock_fd, path);
+                    // If the new object is a regular file, send the contents
+                    if ( !(event->mask & IN_ISDIR) )
+                        send_file(sock_fd, path);
                     // Add the new file to the watch list
                     wfd = inotify_add_watch(ifd, path, in_my_flags);
                     if (wfd == -1) {
@@ -166,12 +173,12 @@ int main(int argc, char** argv) {
                     path_map[wfd] = path;
                     watch_fds[num_fds++] = wfd;
                 }
-            } //IN_CREATE
+            } 
             if (event->mask & IN_CLOSE_WRITE) {
-                dprintf("\tIN_CLOSE_WRITE\n");
                 // If it's a file, send the contents
                 if (event->len == 0) {
                     char* path = path_map[event->wd];
+                    dprintf("IN_CLOSE_WRITE: %s\n", path);
                     // Send the pathname
                     send_path(sock_fd, path);
                     // Send the event type
@@ -185,11 +192,11 @@ int main(int argc, char** argv) {
                     send_file(sock_fd, path);
                 }
             } 
-            if (event->mask & IN_DELETE) {
-                dprintf("\tIN_DELETE\n");
+            if (event->mask & IN_DELETE || event->mask & IN_MOVED_FROM) {
                 // Send the path to the server
                 char* path = join_path(path_map[event->wd], event->name, 
                         event->mask & IN_ISDIR);
+                dprintf("IN_DELETE: %s\n", path);
                 send_path(sock_fd, path);
                 // Send the event type
                 event_type = f_delete;

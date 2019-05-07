@@ -55,6 +55,7 @@ void recv_file(char* path, int data_fd) {
             exit(EXIT_FAILURE);
         }
     }
+    close(local_file);
 }
 
 int main(int argc, char** argv) {
@@ -143,6 +144,7 @@ int main(int argc, char** argv) {
                             perror("mkdir");
                             exit(EXIT_FAILURE);
                         }
+                        break;
                     } else { // New path is a file
                         ret = creat(path, 0755);
                         if (ret == -1) {
@@ -150,11 +152,10 @@ int main(int argc, char** argv) {
                             exit(EXIT_FAILURE);
                         }
                         close(ret);
-                    }
-                    // Then get the file contents
-                    recv_file(path, data_fd);
-                    break;
-                
+                        // Then get the file contents
+                        recv_file(path, data_fd);
+                        break;
+                    } 
                 case f_delete:
                     dprintf("Deleting %s\n", path);
                     ret = remove(path);
